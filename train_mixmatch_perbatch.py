@@ -21,21 +21,21 @@ def get_args():
     parser.add_argument("--model_arch", default="wideresnet")
     parser.add_argument("--model_name", default="wideresnet-28-2")
     parser.add_argument("--num_epochs", default=300, type=int)
-    parser.add_argument("--results_dir", type=str, default="/data/weights/hayoung/mixmatch/t1")
+    parser.add_argument("--results_dir", type=str, default="/data/weights/hayoung/mixmatch/t2")
     parser.add_argument("--batch_size", default=16, type=int)
     parser.add_argument("--datadir", type=str, default="/data/data/stl10")
     parser.add_argument("--device", type=str, default="0")
-    parser.add_argument("--lr", type=float, default=0.005)
-    parser.add_argument("--tensorboard_path", type=str, default="./runs/mixmatch/t1")
+    parser.add_argument("--lr", type=float, default=0.01)
+    parser.add_argument("--tensorboard_path", type=str, default="./runs/mixmatch/t2")
     parser.add_argument("--tsa", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--ema", action="store_true")
     parser.add_argument("--weight", type=str, default="/data/weights/hayoung/mixmatch/t1/model_last.pth")
-    parser.add_argument("--resolution", type=int, default=224)
+    parser.add_argument("--resolution", type=int, default=96)
     parser.add_argument("--randaug_u", help="use additional randaug for unlabeled dataset", action="store_true")
     parser.add_argument("--k", type=int, help="number of augmentation for unlabeled data", default=2)
     parser.add_argument("--alpha", type=float, default=0.75)
-    parser.add_argument("--unsup_weight", type=float, default=100.0)
+    parser.add_argument("--unsup_weight", type=float, default=50.0)
     args = parser.parse_args()
 
     return args
@@ -101,7 +101,7 @@ def main(args):
         transforms.RandomCrop(96),
         transforms.Resize(resolution),
         transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0),
+        # transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0),
     ])
     if args.randaug_u:
         train_transform.transforms.append(RandAugment(1, 2))
@@ -136,7 +136,7 @@ def main(args):
         print("Val loss: {}\tVal acc: {}".format(val_loss, val_acc))
         print("--------------------------------------------")
         # scheduler.step(val_loss)
-        print("{}".format(optimizer.state_dict))
+        print("{}".format(optimizer.state_dict()["lr"]))
         if ep == 0:
             best_val_loss = val_loss
         else:
@@ -152,6 +152,7 @@ def train(ep, model, loader, _transforms, sup_criterion, unsup_criterion, optimi
     model.train()
     train_loss = 0.
     train_acc = 0.
+    acc_count = 0
     normalize = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     softmax = nn.Softmax(dim=1)
     sharpen_softmax = SharpenSoftmax(0.5, dim=1)
@@ -217,12 +218,13 @@ def train(ep, model, loader, _transforms, sup_criterion, unsup_criterion, optimi
             ema.update()
         if labeled_mask.sum() > 0:
             running_acc = (outputs[labeled_mask].argmax(1) == mixed_labels[labeled_mask].argmax(1)).sum().item()
+            acc_count += 1
         else:
             running_acc = 0
         train_acc += running_acc
         writer.add_scalar("train acc", running_acc, ep * len(loader) + i)
     train_loss /= len(loader)
-    train_acc /= len(loader.dataset)
+    train_acc /= acc_count
     return train_loss, train_acc, model, optimizer
 
 
@@ -277,5 +279,8 @@ def save_checkpoint(ep, model, optimizer, scheduler, savepath, best_val_loss, be
 if __name__ == "__main__":
     args = get_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
+    if args.results_dir[-1] == "/":
+        args.results_dir = args.results_dir[:-1]
+    args.results_dir = args.results_dir + "b" + str(args.batch_size) + "l" + str(args.lr)
     os.makedirs(args.results_dir, exist_ok=True)
     main(args)
