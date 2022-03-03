@@ -8,7 +8,6 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
 from efficientnet_pytorch import EfficientNet
-from torch_ema import ExponentialMovingAverage
 from randaugment import RandAugment
 from models.wideresnet import WideResNet
 from utils.misc import load_full_checkpoint, SharpenSoftmax
@@ -29,8 +28,7 @@ def get_args():
     parser.add_argument("--tensorboard_path", type=str, default="./runs/mixmatch/t2")
     parser.add_argument("--tsa", action="store_true")
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--ema", action="store_true")
-    parser.add_argument("--weight", type=str, default="/data/weights/hayoung/mixmatch/t1/model_last.pth")
+    parser.add_argument("--weight", type=str, default="/data/weights/hayoung/mixmatch/t2b32l0.01/model_last.pth")
     parser.add_argument("--resolution", type=int, default=96)
     parser.add_argument("--randaug_u", help="use additional randaug for unlabeled dataset", action="store_true")
     parser.add_argument("--k", type=int, help="number of augmentation for unlabeled data", default=2)
@@ -52,22 +50,22 @@ def get_loaders(args, resolution, train_transform=None, test_transform=None):
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
-    # train_transform_u = transforms.Compose([
-    #     transforms.PILToTensor(),
-    # ])
+    train_transform_u = transforms.Compose([
+        transforms.PILToTensor(),
+    ])
     # dataset
     if args.dataset_name == "stl10":
         valset = datasets.STL10(args.datadir, "test", transform=test_transform, download=True)
-        trainset = datasets.STL10(args.datadir, "train+unlabeled", transform=train_transform, download=True)
-        # unlabelset = datasets.STL10(args.datadir, "unlabeled", transform=train_transform_u, download=True)
+        trainset = datasets.STL10(args.datadir, "train", transform=train_transform, download=True)
+        unlabelset = datasets.STL10(args.datadir, "unlabeled", transform=train_transform_u, download=True)
     else:
         raise Exception("Not supported dataset")
     # loader
     trainloader = DataLoader(trainset, args.batch_size, True, num_workers=0, pin_memory=True)
     valloader = DataLoader(valset, args.batch_size, False, num_workers=0, pin_memory=True)
-    # trainloader_u = DataLoader(unlabelset, args.batch_size, False, num_workers=0, pin_memory=True)
+    trainloader_u = DataLoader(unlabelset, args.batch_size, True, num_workers=0, pin_memory=True)
 
-    return trainloader, valloader
+    return trainloader, valloader, trainloader_u
 
 
 def get_model(args, device):
@@ -81,12 +79,6 @@ def get_model(args, device):
     else:
         raise Exception("Not supported network architecture")
 
-    # if args.ema:
-    #     ema = ExponentialMovingAverage(model.parameters(), decay=0.999)
-    #     ema = ema.to(device)
-    # else:
-    #     ema = None
-
     model.to(device)
     return model
 
@@ -98,18 +90,17 @@ def main(args):
     resolution = (args.resolution, args.resolution)
     train_transform = transforms.Compose([
         transforms.Pad(12),
-        transforms.RandomCrop(96),
+        transforms.RandomCrop(resolution),
         transforms.Resize(resolution),
         transforms.RandomHorizontalFlip(),
         # transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0),
     ])
     if args.randaug_u:
         train_transform.transforms.append(RandAugment(1, 2))
-    trainloader, valloader = get_loaders(args, resolution)
+    trainloader, valloader, trainloader_u = get_loaders(args, resolution)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(args, device)
-    ema = None  # temporarily None
     
     supcriterion = nn.BCELoss(reduction='mean')
     unsupcriterion = nn.MSELoss()
@@ -129,14 +120,14 @@ def main(args):
         scheduler.step()
         print("Epoch {} --------------------------------------------".format(ep + 1))
         train_loss, train_acc, model, optimizer = \
-            train(ep, model, trainloader, train_transform,
-                  supcriterion, unsupcriterion, optimizer, writer, args.num_epochs, ema)
+            train(ep, model, trainloader, trainloader_u, train_transform,
+                  supcriterion, unsupcriterion, optimizer, writer, args.num_epochs)
         print("Train loss: {}\tTrain acc: {}".format(train_loss, train_acc))
-        val_loss, val_acc = eval_model(ep, model, valloader, writer, args.num_epochs, ema)
+        val_loss, val_acc = eval_model(ep, model, valloader, writer, args.num_epochs)
         print("Val loss: {}\tVal acc: {}".format(val_loss, val_acc))
         print("--------------------------------------------")
         # scheduler.step(val_loss)
-        print("{}".format(optimizer.state_dict()["lr"]))
+        print("{}".format(optimizer.state_dict()['param_groups'][0]["lr"]))
         if ep == 0:
             best_val_loss = val_loss
         else:
@@ -148,7 +139,7 @@ def main(args):
     print("Best Val Loss: {} / Acc: {}".format(best_val_loss, best_val_acc))
 
 
-def train(ep, model, loader, _transforms, sup_criterion, unsup_criterion, optimizer, writer, eps, ema):
+def train(ep, model, loader, loader_u, _transforms, sup_criterion, unsup_criterion, optimizer, writer, eps):
     model.train()
     train_loss = 0.
     train_acc = 0.
@@ -170,7 +161,7 @@ def train(ep, model, loader, _transforms, sup_criterion, unsup_criterion, optimi
             inputs_w_l = normalize(_transforms(inputs_w[~mask_w]) / 255.)  # for labeled data
             # !! for convinence, shuffle k augmented unlabeled data within a mini-batch, not for entire dataset !!
             # !! Therefore, args.batch_size doesn't work as an actual batch size.
-            # !! Real batch size depends on args.batch_size, args.k, and the number of chosen labeled data
+            # !! Real batch size is equal to: [(1 + args.k) * args.batch_size]
             inputs_w_uk = []
             pred_k = torch.zeros((mask_w.sum().item(), args.num_classes)).cuda()
             for _ in range(args.k):
@@ -205,20 +196,12 @@ def train(ep, model, loader, _transforms, sup_criterion, unsup_criterion, optimi
         unsup_loss = unsup_criterion(outputs[~labeled_mask], mixed_labels[~labeled_mask])
         total_loss = sup_loss + args.unsup_weight * unsup_loss
 
-        # backward
-        # if args.tsa:
-        #     tsa_mask = get_tsa_mask(sup_outputs, eps, ep, len(unsuploader), i)
-        #     sup_loss = (sup_loss * tsa_mask.max(1)[0]).sum()
-        # else:
-        #     sup_loss = sup_loss.mean()
         train_loss += total_loss.item()
         total_loss.backward() 
         optimizer.step()
-        if ema is not None:
-            ema.update()
         if labeled_mask.sum() > 0:
             running_acc = (outputs[labeled_mask].argmax(1) == mixed_labels[labeled_mask].argmax(1)).sum().item()
-            acc_count += 1
+            acc_count += labeled_mask.sum()
         else:
             running_acc = 0
         train_acc += running_acc
@@ -228,34 +211,21 @@ def train(ep, model, loader, _transforms, sup_criterion, unsup_criterion, optimi
     return train_loss, train_acc, model, optimizer
 
 
-def eval_model(ep, model, loader, writer, eps, ema):
+def eval_model(ep, model, loader, writer, eps):
     model.eval()
     val_loss = 0
     val_acc = 0
     criterion = nn.CrossEntropyLoss()
-    if ema is not None:
-        with ema.average_parameters():
-            with torch.no_grad():
-                for i, (inputs, labels) in enumerate(tqdm(loader)):
-                    inputs, labels = inputs.cuda(), labels.cuda()
-                    outputs = model(inputs)
-                    running_acc = (outputs.argmax(1) == labels).sum().item()
-                    val_acc += running_acc
-                    loss = criterion(outputs, labels).sum()
-                    val_loss += loss.item()
-                    writer.add_scalar("val loss", loss.item(), ep * len(loader) + i)
-                    writer.add_scalar("val acc", running_acc, ep * len(loader) + i)
-    else:
-        with torch.no_grad():
-            for i, (inputs, labels) in enumerate(tqdm(loader)):
-                inputs, labels = inputs.cuda(), labels.cuda()
-                outputs = model(inputs)
-                running_acc = (outputs.argmax(1) == labels).sum().item()
-                val_acc += running_acc
-                loss = criterion(outputs, labels).sum()
-                val_loss += loss.item()
-                writer.add_scalar("val loss", loss.item(), ep * len(loader) + i)
-                writer.add_scalar("val acc", running_acc, ep * len(loader) + i)
+    with torch.no_grad():
+        for i, (inputs, labels) in enumerate(tqdm(loader)):
+            inputs, labels = inputs.cuda(), labels.cuda()
+            outputs = model(inputs)
+            running_acc = (outputs.argmax(1) == labels).sum().item()
+            val_acc += running_acc
+            loss = criterion(outputs, labels).sum()
+            val_loss += loss.item()
+            writer.add_scalar("val loss", loss.item(), ep * len(loader) + i)
+            writer.add_scalar("val acc", running_acc, ep * len(loader) + i)
     val_loss /= len(loader)
     val_acc /= len(loader.dataset)
     return val_loss, val_acc
