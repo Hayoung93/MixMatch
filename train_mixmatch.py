@@ -191,6 +191,7 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
     labeled_generator = iter(loader)
     batch_ind_size = math.ceil(len(index_a) / (args.batch_size * args.k))
     for i in tqdm(range(batch_ind_size)):
+        optimizer.zero_grad()
         # construct set A for Mixup
         labeled_inputs = []
         labeled_labels = []
