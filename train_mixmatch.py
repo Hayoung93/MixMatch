@@ -36,6 +36,8 @@ def get_args():
     parser.add_argument("--k", type=int, help="number of augmentation for unlabeled data", default=2)
     parser.add_argument("--alpha", type=float, default=0.75)
     parser.add_argument("--unsup_weight", type=float, default=50.0)
+    parser.add_argument("--use_disk", action="store_true")
+    parser.add_argument("--temp_disk", type=str, default="./temp")
     args = parser.parse_args()
 
     return args
@@ -59,15 +61,6 @@ def get_loaders(args, resolution, train_transform=None, test_transform=None):
         unlabelset = datasets.STL10(args.datadir, "unlabeled", transform=train_transform, download=True)
     else:
         raise Exception("Not supported dataset")
-    
-    # compute batch size for labeled and unlabeled set
-    # batchsize_labeled = round(args.batch_size / (args.k + 1))
-    # batchsize_unlabeled = args.batch_size - batchsize_labeled
-    # while batchsize_unlabeled % args.k != 0:
-    #     print("adjust batch size...")
-    #     batchsize_labeled += 1
-    #     batchsize_unlabeled -= 1
-    # print("Labeled batch size: {}\t/\tUnlabeled batch size: {}".format(batchsize_labeled, batchsize_unlabeled))
 
     # loader
     trainloader = DataLoader(trainset, 1, True, num_workers=0, pin_memory=True)
@@ -165,19 +158,38 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
     # label guess
     # To store all transformed inputs of STL-10 with args.k==2, additional ~30GB of memory space is required.
     print("Processing label guess...")
-    inputs_unlabeled = []
-    guessed_labels = []
-    with torch.no_grad():
-        for (samples, _) in tqdm(loader_u):
-            samples = samples.cuda()
-            pred_k = torch.zeros((samples.size()[0], args.num_classes)).cuda()
-            for _ in range(args.k):
-                samples_k = normalize(_transforms(samples) / 255.)
-                pred_k = pred_k + sharpen_softmax(model(samples_k))
-                for s in samples_k.cpu():
-                    inputs_unlabeled.append(s)
-            pred_k = pred_k / args.k
-            guessed_labels = guessed_labels + [p for p in pred_k] * args.k
+    if args.use_disk:
+        os.chdir("../MixMatch")
+        iu = 0
+        inputs_unlabeled = []
+        guessed_labels = []
+        with torch.no_grad():
+            for (samples, _) in tqdm(loader_u):
+                samples = samples.cuda()
+                pred_k = torch.zeros((samples.size()[0], args.num_classes)).cuda()
+                for _ in range(args.k):
+                    samples_k = normalize(_transforms(samples) / 255.)
+                    pred_k = pred_k + sharpen_softmax(model(samples_k))
+                    for s in samples_k.cpu():
+                        inputs_unlabeled.append(iu)
+                        np.save(os.path.join(args.temp_disk, str(iu) + ".npy"), s.numpy())
+                        iu += 1
+                pred_k = pred_k / args.k
+                guessed_labels = guessed_labels + [p for p in pred_k] * args.k
+    else:
+        inputs_unlabeled = []
+        guessed_labels = []
+        with torch.no_grad():
+            for (samples, _) in tqdm(loader_u):
+                samples = samples.cuda()
+                pred_k = torch.zeros((samples.size()[0], args.num_classes)).cuda()
+                for _ in range(args.k):
+                    samples_k = normalize(_transforms(samples) / 255.)
+                    pred_k = pred_k + sharpen_softmax(model(samples_k))
+                    for s in samples_k.cpu():
+                        inputs_unlabeled.append(s)
+                pred_k = pred_k / args.k
+                guessed_labels = guessed_labels + [p for p in pred_k] * args.k
     print("Label guess done. {}/{}".format(len(inputs_unlabeled), len(guessed_labels)))
 
     # compute input batch
@@ -205,7 +217,13 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
                 _inputs, _labels = labeled_generator.next()
                 labeled_inputs.append(normalize(_transforms(_inputs) / 255.).cuda())
                 labeled_labels.append(nn.functional.one_hot(_labels.cuda(), args.num_classes))
-        unlabeled_inputs = [inputs_unlabeled[b].unsqueeze(0).cuda() for b in u_batch_ind_a]
+        if args.use_disk:
+            unlabeled_inputs = []
+            for b in u_batch_ind_a:
+                u_inputs = torch.from_numpy(np.load(os.path.join(args.temp_disk, str(b) + ".npy"))).unsqueeze(0).cuda()
+                unlabeled_inputs.append(u_inputs)
+        else:
+            unlabeled_inputs = [inputs_unlabeled[b].unsqueeze(0).cuda() for b in u_batch_ind_a]
         unlabeled_labels = [guessed_labels[b].unsqueeze(0).cuda() for b in u_batch_ind_a]
         batch_ind_a = list(range(len(labeled_inputs) + len(unlabeled_inputs)))
         np.random.shuffle(batch_ind_a)
