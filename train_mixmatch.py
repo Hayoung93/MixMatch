@@ -38,6 +38,7 @@ def get_args():
     parser.add_argument("--unsup_weight", type=float, default=50.0)
     parser.add_argument("--use_disk", action="store_true")
     parser.add_argument("--temp_disk", type=str, default="./temp")
+    parser.add_argument("--cosine_tmax", type=int, default=300)
     args = parser.parse_args()
 
     return args
@@ -112,7 +113,7 @@ def main(args):
     supcriterion = nn.BCELoss(reduction='mean')
     unsupcriterion = nn.MSELoss()
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=0.0005)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, args.num_epochs)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, args.cosine_tmax)
 
     if args.resume:
         model, optimizer, scheduler, last_epoch, best_val_loss, best_val_acc = \
@@ -248,7 +249,11 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
                 inputs_b.append(normalize(_transforms(_inputs.unsqueeze(0).cuda()) / 255.))
                 labels_b.append(nn.functional.one_hot(torch.tensor(_labels), args.num_classes).unsqueeze(0).cuda())
             else:  # get sample from unlabeled data
-                inputs_b.append(inputs_unlabeled[ind_b].unsqueeze(0).cuda())
+                if args.use_disk:
+                    u_inputs = torch.from_numpy(np.load(os.path.join(args.temp_disk, str(ind_b) + ".npy"))).unsqueeze(0).cuda()
+                    inputs_b.append(u_inputs)
+                else:
+                    inputs_b.append(inputs_unlabeled[ind_b].unsqueeze(0).cuda())
                 labels_b.append(guessed_labels[ind_b].unsqueeze(0).cuda())
         inputs_b = torch.cat(inputs_b, dim=0)
         labels_b = torch.cat(labels_b, dim=0)
