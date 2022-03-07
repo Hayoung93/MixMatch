@@ -22,16 +22,16 @@ def get_args():
     parser.add_argument("--model_arch", default="wideresnet")
     parser.add_argument("--model_name", default="wideresnet-28-2")
     parser.add_argument("--num_epochs", default=300, type=int)
-    parser.add_argument("--results_dir", type=str, default="/data/weights/hayoung/mixmatch/t3")
+    parser.add_argument("--results_dir", type=str, default="/data/weights/hayoung/mixmatch/t4")
     parser.add_argument("--batch_size", default=32, type=int)
     parser.add_argument("--datadir", type=str, default="/data/data/stl10")
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--lr", type=float, default=0.005)
-    parser.add_argument("--tensorboard_path", type=str, default="./runs/mixmatch/t3")
+    parser.add_argument("--tensorboard_path", type=str, default="./runs/mixmatch/t4")
     parser.add_argument("--tsa", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--ema", action="store_true")
-    parser.add_argument("--weight", type=str, default="/data/weights/hayoung/mixmatch/t2/model_last.pth")
+    parser.add_argument("--weight", type=str, default="/data/weights/hayoung/mixmatch/t3/model_last.pth")
     parser.add_argument("--resolution", type=int, default=96)
     parser.add_argument("--k", type=int, help="number of augmentation for unlabeled data", default=2)
     parser.add_argument("--alpha", type=float, default=0.75)
@@ -173,11 +173,10 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
             pred_k = torch.zeros((samples.size()[0], args.num_classes)).cuda()
             for _ in range(args.k):
                 samples_k = normalize(_transforms(samples) / 255.)
-                pred_k = pred_k + model(samples_k)
+                pred_k = pred_k + sharpen_softmax(model(samples_k))
                 for s in samples_k.cpu():
                     inputs_unlabeled.append(s)
             pred_k = pred_k / args.k
-            pred_k = sharpen_softmax(pred_k)
             guessed_labels = guessed_labels + [p for p in pred_k] * args.k
     print("Label guess done. {}/{}".format(len(inputs_unlabeled), len(guessed_labels)))
 
