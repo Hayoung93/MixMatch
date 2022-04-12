@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from torch import nn
 
 
@@ -11,6 +12,14 @@ class SharpenSoftmax(nn.Module):
     def forward(self, pred):
         pred = pred ** (1 / self.T)
         return pred.softmax(self.dim)
+
+
+class LogWeight():
+    def __init__(self, exp, max_ep):
+        self.line = (exp ** np.asarray(list(range(max_ep))) - 1) / (exp - 1)
+    
+    def __call__(self, ep):
+        return self.line[ep]
 
 
 def get_tsa_mask(pred, max_epoch, epoch, iter_per_epoch, iteration):

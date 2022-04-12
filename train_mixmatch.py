@@ -12,7 +12,7 @@ from efficientnet_pytorch import EfficientNet
 from torch_ema import ExponentialMovingAverage
 from randaugment import RandAugment
 from models.wideresnet import WideResNet
-from utils.misc import load_full_checkpoint, SharpenSoftmax
+from utils.misc import load_full_checkpoint, SharpenSoftmax, LogWeight
 
 
 def get_args():
@@ -53,7 +53,6 @@ def get_loaders(args, resolution, train_transform=None, test_transform=None):
         test_transform = transforms.Compose([
             transforms.Resize(resolution),
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
     # dataset
     if args.dataset_name == "stl10":
@@ -119,6 +118,7 @@ def main(args):
         model, optimizer, scheduler, last_epoch, best_val_loss, best_val_acc = \
             load_full_checkpoint(model, optimizer, scheduler, args.weight)
         print("Loaded checkpoint from: {}".format(args.weight))
+        optimizer.state_dict()['param_groups'][0]['lr'] = args.lr
         start_epoch = last_epoch + 1
     else:
         start_epoch = 0
@@ -151,7 +151,7 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
     model.train()
     train_loss = 0.
     train_acc = 0.
-    normalize = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    # normalize = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     softmax = nn.Softmax(dim=1)
     sharpen_softmax = SharpenSoftmax(0.5, dim=1)
     beta = torch.distributions.beta.Beta(args.alpha, args.alpha)
@@ -160,6 +160,7 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
     # To store all transformed inputs of STL-10 with args.k==2, additional ~30GB of memory space is required.
     print("Processing label guess...")
     if args.use_disk:
+        print("Using disk intead of memory")
         os.chdir("../MixMatch")
         iu = 0
         inputs_unlabeled = []
@@ -169,7 +170,7 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
                 samples = samples.cuda()
                 pred_k = torch.zeros((samples.size()[0], args.num_classes)).cuda()
                 for _ in range(args.k):
-                    samples_k = normalize(_transforms(samples) / 255.)
+                    samples_k = _transforms(samples) / 255.
                     pred_k = pred_k + sharpen_softmax(model(samples_k))
                     for s in samples_k.cpu():
                         inputs_unlabeled.append(iu)
@@ -185,7 +186,7 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
                 samples = samples.cuda()
                 pred_k = torch.zeros((samples.size()[0], args.num_classes)).cuda()
                 for _ in range(args.k):
-                    samples_k = normalize(_transforms(samples) / 255.)
+                    samples_k = _transforms(samples) / 255.
                     pred_k = pred_k + sharpen_softmax(model(samples_k))
                     for s in samples_k.cpu():
                         inputs_unlabeled.append(s)
@@ -193,6 +194,8 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
                 guessed_labels = guessed_labels + [p for p in pred_k] * args.k
     print("Label guess done. {}/{}".format(len(inputs_unlabeled), len(guessed_labels)))
 
+    # Unsup weight coeff
+    unsup_weight_coeff = LogWeight(10, args.num_epochs)
     # compute input batch
     index_a = list(range(len(inputs_unlabeled)))
     index_w = list(range(len(inputs_unlabeled) + len(loader)))
@@ -211,12 +214,12 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
         for _ in range(args.batch_size):  # get labeled set, size: args.batch_size
             try:
                 _inputs, _labels = labeled_generator.next()
-                labeled_inputs.append(normalize(_transforms(_inputs) / 255.).cuda())
+                labeled_inputs.append((_transforms(_inputs) / 255.).cuda())
                 labeled_labels.append(nn.functional.one_hot(_labels.cuda(), args.num_classes))
             except StopIteration:
                 labeled_generator = iter(loader)
                 _inputs, _labels = labeled_generator.next()
-                labeled_inputs.append(normalize(_transforms(_inputs) / 255.).cuda())
+                labeled_inputs.append((_transforms(_inputs) / 255.).cuda())
                 labeled_labels.append(nn.functional.one_hot(_labels.cuda(), args.num_classes))
         if args.use_disk:
             unlabeled_inputs = []
@@ -246,7 +249,7 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
 
             if ind_b >= len(inputs_unlabeled):  # get sample from labeled data
                 _inputs, _labels = loader.dataset.__getitem__(ind_b - len(inputs_unlabeled))
-                inputs_b.append(normalize(_transforms(_inputs.unsqueeze(0).cuda()) / 255.))
+                inputs_b.append(_transforms(_inputs.unsqueeze(0).cuda()) / 255.)
                 labels_b.append(nn.functional.one_hot(torch.tensor(_labels), args.num_classes).unsqueeze(0).cuda())
             else:  # get sample from unlabeled data
                 if args.use_disk:
@@ -268,7 +271,8 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
         outputs = model(inputs).softmax(dim=1)
         sup_loss = sup_criterion(outputs[label_mask], labels[label_mask])
         unsup_loss = unsup_criterion(outputs[~label_mask], labels[~label_mask])
-        total_loss = sup_loss + args.unsup_weight * unsup_loss
+        # total_loss = sup_loss + args.unsup_weight * unsup_loss
+        total_loss = sup_loss + (unsup_weight_coeff(ep) * args.unsup_weight) * unsup_loss
         train_loss += total_loss.item()
         total_loss.backward()
         optimizer.step()
