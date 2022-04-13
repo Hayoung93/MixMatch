@@ -17,12 +17,12 @@ Install Pytorch, EfficientNet and tqdm: `pip install torch==1.8.0 torchvision==0
 - Install gdown: `pip install gdown`
 - Download weight:
     - #### WideResNet-28-2
-    - Model without EMA, linearly growing unsup weight (test acc 0.889): `gdown --id `
+    - Model without EMA, linearly growing unsup weight (test acc 0.889): `gdown --id 16coQ8EO0tBvRMVsmW_hbpIyKGTaRJL8l`
 
 ### Train on STL-10 dataset
 - #### Apply mixmatch's batch computing algorithm to whole dataset  
     `python train_mixmatch.py`  
-- Use `--use_disk` option to store computed data at your disk instead of memory. Without this option, over 20GB of memory is required in the case of STL-10 dataset.  
+- Use `--use_disk` option to store computed data at your disk instead of memory (SSD recommended). Without this option, over 20GB of memory is required in the case of STL-10 dataset.  
 - #### Apply mixmatch's batch computing algorithm to each mini-batch  
     `python train_mixmatch_perbatch.py`
 
