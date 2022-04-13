@@ -16,7 +16,7 @@ class SharpenSoftmax(nn.Module):
 
 class LogWeight():
     def __init__(self, exp, max_ep):
-        self.line = (exp ** np.asarray(list(range(max_ep))) - 1) / (exp - 1)
+        self.line = (exp ** (np.asarray(list(range(max_ep))) / max_ep) - 1) / (exp - 1)
     
     def __call__(self, ep):
         return self.line[ep]
