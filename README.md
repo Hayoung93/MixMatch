@@ -21,10 +21,10 @@ Install Pytorch, EfficientNet and tqdm: `pip install torch==1.8.0 torchvision==0
 
 ### Train on STL-10 dataset
 - #### Apply mixmatch's batch computing algorithm to whole dataset  
-- `python train_mixmatch.py`  
+    `python train_mixmatch.py`  
 - Use `--use_disk` option to store computed data at your disk instead of memory. Without this option, over 20GB of memory is required in the case of STL-10 dataset.  
 - #### Apply mixmatch's batch computing algorithm to each mini-batch  
-- `python train_mixmatch_perbatch.py`
+    `python train_mixmatch_perbatch.py`
 
 ### TODO:
 - Add configuration file
