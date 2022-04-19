@@ -17,7 +17,8 @@ Install Pytorch, EfficientNet and tqdm: `pip install torch==1.8.0 torchvision==0
 - Install gdown: `pip install gdown`
 - Download weight:
     - #### WideResNet-28-2
-
+    - Model without EMA, linearly growing unsup weight (test acc 0.889): `gdown --id 16coQ8EO0tBvRMVsmW_hbpIyKGTaRJL8l`  
+    - Model without EMA, exponentially growing unsup weight (test acc 0.89575) `gdown --id 1xD34AAt5MazlEUwmIbPfeWPwncvYBB9g`  
 
 ### Train on STL-10 dataset
 - #### Apply mixmatch's batch computing algorithm to whole dataset  
