@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from torch import nn
+from copy import deepcopy
 
 
 class SharpenSoftmax(nn.Module):
@@ -20,6 +21,27 @@ class LogWeight():
     
     def __call__(self, ep):
         return self.line[ep]
+
+class EmaModel(nn.Module):
+    def __init__(self, model, alpha=0.9999):
+        super().__init__()
+        self.module = deepcopy(model)
+        self.module.eval()
+        self.alpha = alpha
+    
+    def _update(self, model, update_fn):
+        with torch.no_grad():
+            for ema_v, model_v in zip(self.module.state_dict().values(), model.state_dict().values()):
+                ema_v.copy_(update_fn(ema_v, model_v))
+    
+    def update(self, model):
+        self._update(model, update_fn=lambda e, m: self.alpha * e + (1. - self.alpha) * m)
+    
+    def set(self, model):
+        self._update(model, update_fn=lambda e, m: m)
+    
+    def forward(self, x):
+        return self.module(x)
 
 
 def get_tsa_mask(pred, max_epoch, epoch, iter_per_epoch, iteration):

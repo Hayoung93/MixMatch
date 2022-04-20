@@ -9,10 +9,9 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
 from efficientnet_pytorch import EfficientNet
-from torch_ema import ExponentialMovingAverage
 from randaugment import RandAugment
 from models.wideresnet import WideResNet
-from utils.misc import load_full_checkpoint, SharpenSoftmax, LogWeight
+from utils.misc import load_full_checkpoint, SharpenSoftmax, LogWeight, EmaModel
 
 
 def get_args():
@@ -81,12 +80,6 @@ def get_model(args, device):
     else:
         raise Exception("Not supported network architecture")
 
-    # if args.ema:
-    #     ema = ExponentialMovingAverage(model.parameters(), decay=0.999)
-    #     ema = ema.to(device)
-    # else:
-    #     ema = None
-
     model.to(device)
     return model
 
@@ -107,7 +100,10 @@ def main(args):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(args, device)
-    ema = None  # temporarily None
+    if args.ema:
+        ema_model = EmaModel(model)
+    else:
+        ema_model = None
     
     supcriterion = nn.BCELoss(reduction='mean')
     unsupcriterion = nn.MSELoss()
@@ -120,6 +116,8 @@ def main(args):
         print("Loaded checkpoint from: {}".format(args.weight))
         optimizer.state_dict()['param_groups'][0]['lr'] = args.lr
         start_epoch = last_epoch + 1
+        val_loss, val_acc = eval_model(-1, model, model, valloader, None, args.num_epochs)
+        print("Val loss: {}\tVal acc: {}".format(val_loss, val_acc))
     else:
         start_epoch = 0
         best_val_acc = 0.
@@ -127,11 +125,11 @@ def main(args):
     for ep in range(start_epoch, args.num_epochs):
         print("Epoch {} --------------------------------------------".format(ep + 1))
         train_loss, train_acc, model, optimizer = \
-            train(args, ep, model, trainloader, trainloader_u, train_transform,
-                  supcriterion, unsupcriterion, optimizer, writer, args.num_epochs, ema)
+            train(args, ep, model, ema_model, trainloader, trainloader_u, train_transform,
+                  supcriterion, unsupcriterion, optimizer, writer, args.num_epochs)
         print("Train loss: {}\tTrain acc: {}".format(train_loss, train_acc))
         scheduler.step()
-        val_loss, val_acc = eval_model(ep, model, valloader, writer, args.num_epochs, ema)
+        val_loss, val_acc = eval_model(ep, model, ema_model, valloader, writer, args.num_epochs)
         print("Val loss: {}\tVal acc: {}".format(val_loss, val_acc))
         print("--------------------------------------------")
         # scheduler.step(val_loss)
@@ -142,12 +140,18 @@ def main(args):
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_val_acc = val_acc
-                save_checkpoint(ep, model, optimizer, scheduler, args.results_dir, best_val_loss, best_val_acc, True)
-        save_checkpoint(ep, model, optimizer, scheduler, args.results_dir, best_val_loss, best_val_acc, False)
+                if args.ema:
+                    save_checkpoint(ep, ema_model, optimizer, scheduler, args.results_dir, best_val_loss, best_val_acc, True)
+                else:
+                    save_checkpoint(ep, model, optimizer, scheduler, args.results_dir, best_val_loss, best_val_acc, True)
+        if args.ema:
+            save_checkpoint(ep, ema_model, optimizer, scheduler, args.results_dir, best_val_loss, best_val_acc, False)
+        else:
+            save_checkpoint(ep, model, optimizer, scheduler, args.results_dir, best_val_loss, best_val_acc, False)
     print("Best Val Loss: {} / Acc: {}".format(best_val_loss, best_val_acc))
 
 
-def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_criterion, optimizer, writer, eps, ema):
+def train(args, ep, model, ema_model, loader, loader_u, _transforms, sup_criterion, unsup_criterion, optimizer, writer, eps):
     model.train()
     train_loss = 0.
     train_acc = 0.
@@ -276,6 +280,8 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
         train_loss += total_loss.item()
         total_loss.backward()
         optimizer.step()
+        if ema_model is not None:
+            ema_model.update(model)
 
         # acc for labeled input
         running_acc = (outputs[label_mask].argmax(1) == labels[label_mask].argmax(1)).sum().item()
@@ -285,32 +291,24 @@ def train(args, ep, model, loader, loader_u, _transforms, sup_criterion, unsup_c
     train_acc /= ((i + 1) * args.batch_size)
     return train_loss, train_acc, model, optimizer
 
-def eval_model(ep, model, loader, writer, eps, ema):
-    model.eval()
+def eval_model(ep, model, ema_model, loader, writer, eps):
+    if ema_model is not None:
+        _model = ema_model
+    else:
+        _model = model
+    _model.eval()
     val_loss = 0
     val_acc = 0
     criterion = nn.CrossEntropyLoss()
-    if ema is not None:
-        with ema.average_parameters():
-            with torch.no_grad():
-                for i, (inputs, labels) in enumerate(tqdm(loader)):
-                    inputs, labels = inputs.cuda(), labels.cuda()
-                    outputs = model(inputs)
-                    running_acc = (outputs.argmax(1) == labels).sum().item()
-                    val_acc += running_acc
-                    loss = criterion(outputs, labels).sum()
-                    val_loss += loss.item()
-                    writer.add_scalar("val loss", loss.item(), ep * len(loader) + i)
-                    writer.add_scalar("val acc", running_acc, ep * len(loader) + i)
-    else:
-        with torch.no_grad():
-            for i, (inputs, labels) in enumerate(tqdm(loader)):
-                inputs, labels = inputs.cuda(), labels.cuda()
-                outputs = model(inputs)
-                running_acc = (outputs.argmax(1) == labels).sum().item()
-                val_acc += running_acc
-                loss = criterion(outputs, labels).sum()
-                val_loss += loss.item()
+    with torch.no_grad():
+        for i, (inputs, labels) in enumerate(tqdm(loader)):
+            inputs, labels = inputs.cuda(), labels.cuda()
+            outputs = _model(inputs)
+            running_acc = (outputs.argmax(1) == labels).sum().item()
+            val_acc += running_acc
+            loss = criterion(outputs, labels).sum()
+            val_loss += loss.item()
+            if writer is not None:
                 writer.add_scalar("val loss", loss.item(), ep * len(loader) + i)
                 writer.add_scalar("val acc", running_acc, ep * len(loader) + i)
     val_loss /= len(loader)
