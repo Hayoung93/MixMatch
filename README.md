@@ -1,4 +1,4 @@
-### Re-implementation for MixMatch
+### Re-implementation of MixMatch
 
 - Uses WideResNet-28-2 as backbone network
 - Uses STL-10 dataset
